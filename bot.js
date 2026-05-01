@@ -6,7 +6,7 @@ const http = require('http');
 const TOKEN = process.env.TOKEN; // из Render Environment
 const SHEET_ID = process.env.SHEET_ID; // ID Google таблицы
 const SHEET_NAME = 'tg-bot-rio'; // имя листа
-const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 минут
+const CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 минуты
 // ──────────────────────────────────────────────────────────────────────────────
 
 const bot = new TelegramBot(TOKEN, { polling: true });
