@@ -190,7 +190,3 @@ console.log(`📋 Лист: ${SHEET_NAME}`);
 console.log(`⏱ Проверка каждые 5 минут\n`);
 
 setInterval(checkAndNotify, CHECK_INTERVAL_MS);
-
-// Добавь в самый конец bot.js
-const http = require('http');
-http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
