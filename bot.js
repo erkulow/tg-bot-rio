@@ -121,12 +121,7 @@ async function checkAndNotify() {
 	// Отправляем уведомление только про новых
 	for (const entry of newReady) {
 		const since = readySince.get(entry.driver);
-		const message =
-			`🚛 *${entry.driver}* is READY since *${formatTime(since)}*\n` +
-			`🏢 Company: ${entry.company}\n` +
-			`👤 Dispatcher: ${entry.dispatcher}\n` +
-			`📞 Phone: ${entry.phone}\n` +
-			`📅 Date: ${entry.date}`;
+		const message = `🚛 *${entry.driver}* is READY since *${formatTime(since)}*`;
 
 		for (const chatId of subscribers) {
 			try {
