@@ -3,34 +3,34 @@ const axios = require('axios');
 const http = require('http');
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-const TOKEN = process.env.TOKEN; // из Render Environment
-const SHEET_ID = process.env.SHEET_ID; // ID Google таблицы
-const SHEET_NAME = 'tg-bot-rio'; // имя листа
-const CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 минуты
+const TOKEN = process.env.TOKEN;
+const SHEET_ID = process.env.SHEET_ID;
+const SHEET_NAME = 'tg-bot-rio';
+const CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 минуты (поменяй на 5 * 60 * 1000 для прода)
 // ──────────────────────────────────────────────────────────────────────────────
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 const subscribers = new Set();
 
+// Храним водителей которые уже в статусе READY
+// Ключ: driver name, Значение: время когда впервые увидели READY
+const readySince = new Map();
+
 /**
- * Скачивает лист из Google Sheets как CSV и парсит его
- * Таблица должна быть открыта "Все у кого есть ссылка - могут просматривать"
+ * Скачивает лист из Google Sheets как CSV
  */
 async function fetchSheetData() {
 	const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
-
 	const response = await axios.get(url, { timeout: 10000 });
 	const csv = response.data;
 
-	// Парсим CSV вручную (без библиотек)
-	const rows = csv.split('\n').map((line) => {
-		// Убираем кавычки и разбиваем по запятым
-		return line
-			.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
-			.map((cell) => cell.replace(/^"|"$/g, '').trim());
-	});
-
-	return rows;
+	return csv
+		.split('\n')
+		.map((line) =>
+			line
+				.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
+				.map((cell) => cell.replace(/^"|"$/g, '').trim()),
+		);
 }
 
 /**
@@ -42,23 +42,16 @@ async function findReadyDrivers() {
 	const headerRow = rows[0] || [];
 
 	rows.forEach((row, rowIndex) => {
-		if (rowIndex === 0) return; // пропускаем заголовок
+		if (rowIndex === 0) return;
 
 		row.forEach((cell, colIndex) => {
 			if (cell.toLowerCase() === 'ready') {
-				const company = row[0] || '—';
-				const dispatcher = row[1] || '—';
-				const driver = row[2] || '—';
-				const phone = row[3] || '—';
-				const dateHeader = headerRow[colIndex] || `Колонка ${colIndex + 1}`;
-
 				readyEntries.push({
-					row: rowIndex + 1,
-					date: dateHeader,
-					company,
-					dispatcher,
-					driver,
-					phone,
+					driver: row[2] || '—',
+					company: row[0] || '—',
+					dispatcher: row[1] || '—',
+					phone: row[3] || '—',
+					date: headerRow[colIndex] || `Col ${colIndex + 1}`,
 				});
 			}
 		});
@@ -68,81 +61,106 @@ async function findReadyDrivers() {
 }
 
 /**
- * Форматирует сообщение
+ * Форматирует время в виде "2:00 PM"
  */
-function formatMessage(entries) {
-	if (entries.length === 0) {
-		return `✅ *Нет водителей со статусом READY*\n\n🕐 _${new Date().toLocaleString('ru-RU')}_`;
-	}
-
-	const lines = [`🚛 *READY: найдено ${entries.length} шт.*\n`];
-
-	entries.forEach((e, i) => {
-		lines.push(
-			`*${i + 1}. ${e.driver}*\n` +
-				`   🏢 Компания: ${e.company}\n` +
-				`   👤 Диспетчер: ${e.dispatcher}\n` +
-				`   📞 Телефон: ${e.phone}\n` +
-				`   📅 Дата: ${e.date}\n`,
-		);
+function formatTime(date) {
+	return date.toLocaleTimeString('en-US', {
+		hour: 'numeric',
+		minute: '2-digit',
+		hour12: true,
 	});
-
-	lines.push(`🕐 _${new Date().toLocaleString('ru-RU')}_`);
-	return lines.join('\n');
 }
 
 /**
- * Проверяет и отправляет всем подписчикам
+ * Основная проверка — находит НОВЫХ водителей в READY и уведомляет
  */
 async function checkAndNotify() {
 	if (subscribers.size === 0) {
 		console.log(
-			`[${new Date().toLocaleTimeString()}] Нет подписчиков, пропускаю.`,
+			`[${new Date().toLocaleTimeString()}] No subscribers, skipping.`,
 		);
 		return;
 	}
 
-	console.log(`[${new Date().toLocaleTimeString()}] Проверяю Google Sheets...`);
+	console.log(`[${new Date().toLocaleTimeString()}] Checking Google Sheets...`);
 
-	let message;
+	let currentReady;
 	try {
-		const entries = await findReadyDrivers();
-		message = formatMessage(entries);
-		console.log(`✅ READY найдено: ${entries.length}`);
+		currentReady = await findReadyDrivers();
 	} catch (err) {
-		console.error('❌ Ошибка чтения таблицы:', err.message);
-		message = `⚠️ Не удалось прочитать таблицу: ${err.message}`;
+		console.error('❌ Sheet read error:', err.message);
+		return;
 	}
 
-	for (const chatId of subscribers) {
-		try {
-			await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-		} catch (err) {
-			console.error(`❌ Ошибка отправки ${chatId}:`, err.message);
-			if (err.response?.body?.error_code === 403) {
-				subscribers.delete(chatId);
+	const now = new Date();
+	const currentDriverNames = new Set(currentReady.map((e) => e.driver));
+
+	// Убираем тех кто вышел из READY
+	for (const name of readySince.keys()) {
+		if (!currentDriverNames.has(name)) {
+			readySince.delete(name);
+			console.log(`➖ No longer READY: ${name}`);
+		}
+	}
+
+	// Находим НОВЫХ в READY (кого ещё не было в readySince)
+	const newReady = currentReady.filter((e) => !readySince.has(e.driver));
+
+	// Запоминаем время для новых
+	for (const entry of newReady) {
+		readySince.set(entry.driver, now);
+		console.log(`➕ New READY: ${entry.driver} at ${formatTime(now)}`);
+	}
+
+	// Если новых нет — не спамим
+	if (newReady.length === 0) {
+		console.log('✅ No new READY drivers.');
+		return;
+	}
+
+	// Отправляем уведомление только про новых
+	for (const entry of newReady) {
+		const since = readySince.get(entry.driver);
+		const message =
+			`🚛 *${entry.driver}* is READY since *${formatTime(since)}*\n` +
+			`🏢 Company: ${entry.company}\n` +
+			`👤 Dispatcher: ${entry.dispatcher}\n` +
+			`📞 Phone: ${entry.phone}\n` +
+			`📅 Date: ${entry.date}`;
+
+		for (const chatId of subscribers) {
+			try {
+				await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+			} catch (err) {
+				console.error(`❌ Send error to ${chatId}:`, err.message);
+				if (err.response?.body?.error_code === 403) {
+					subscribers.delete(chatId);
+				}
 			}
 		}
 	}
+
+	console.log(`✅ Notified about ${newReady.length} new READY driver(s).`);
 }
 
 // ─── КОМАНДЫ ──────────────────────────────────────────────────────────────────
 
 bot.onText(/\/start/, (msg) => {
 	const chatId = msg.chat.id;
-	const name = msg.from.first_name || 'друг';
+	const name = msg.from.first_name || 'friend';
 	subscribers.add(chatId);
-	console.log(`➕ Подписался: ${name} (${chatId})`);
+	console.log(`➕ Subscribed: ${name} (${chatId})`);
 
 	bot.sendMessage(
 		chatId,
-		`👋 Привет, *${name}*!\n\n` +
-			`✅ Ты подписан на уведомления о статусе *READY*.\n` +
-			`Бот проверяет Google Таблицу каждые *5 минут*.\n\n` +
-			`Команды:\n` +
-			`/check — проверить прямо сейчас\n` +
-			`/stop — отписаться\n` +
-			`/status — статус бота`,
+		`👋 Hi *${name}*!\n\n` +
+			`✅ You're subscribed to *READY* status alerts.\n` +
+			`Bot checks Google Sheet every *2 minutes* and notifies only when a driver becomes READY.\n\n` +
+			`Commands:\n` +
+			`/check — check right now\n` +
+			`/ready — list currently READY drivers\n` +
+			`/stop — unsubscribe\n` +
+			`/status — bot status`,
 		{ parse_mode: 'Markdown' },
 	);
 });
@@ -151,42 +169,79 @@ bot.onText(/\/stop/, (msg) => {
 	subscribers.delete(msg.chat.id);
 	bot.sendMessage(
 		msg.chat.id,
-		'🔕 Ты отписан. Напиши /start чтобы подписаться снова.',
+		'🔕 Unsubscribed. Send /start to subscribe again.',
 	);
 });
 
+// /check — ручная проверка (показывает всех текущих READY)
 bot.onText(/\/check/, async (msg) => {
 	const chatId = msg.chat.id;
-	await bot.sendMessage(chatId, '🔍 Проверяю Google Таблицу...');
+	await bot.sendMessage(chatId, '🔍 Checking Google Sheet...');
 	try {
 		const entries = await findReadyDrivers();
-		await bot.sendMessage(chatId, formatMessage(entries), {
-			parse_mode: 'Markdown',
-		});
+		if (entries.length === 0) {
+			await bot.sendMessage(
+				chatId,
+				'✅ No drivers with READY status right now.',
+			);
+			return;
+		}
+
+		for (const e of entries) {
+			const since = readySince.get(e.driver);
+			const sinceText = since ? ` since *${formatTime(since)}*` : '';
+			await bot.sendMessage(
+				chatId,
+				`🚛 *${e.driver}* is READY${sinceText}\n` +
+					`🏢 Company: ${e.company}\n` +
+					`👤 Dispatcher: ${e.dispatcher}\n` +
+					`📞 Phone: ${e.phone}\n` +
+					`📅 Date: ${e.date}`,
+				{ parse_mode: 'Markdown' },
+			);
+		}
 	} catch (err) {
-		await bot.sendMessage(chatId, `⚠️ Ошибка: ${err.message}`);
+		await bot.sendMessage(chatId, `⚠️ Error: ${err.message}`);
 	}
+});
+
+// /ready — список кто сейчас в READY с временем
+bot.onText(/\/ready/, (msg) => {
+	const chatId = msg.chat.id;
+	if (readySince.size === 0) {
+		bot.sendMessage(chatId, '✅ No drivers currently tracked as READY.');
+		return;
+	}
+
+	let text = `🚛 *Currently READY (${readySince.size}):*\n\n`;
+	for (const [driver, since] of readySince.entries()) {
+		text += `• *${driver}* — since ${formatTime(since)}\n`;
+	}
+	bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/status/, (msg) => {
 	const chatId = msg.chat.id;
 	bot.sendMessage(
 		chatId,
-		`📊 *Статус бота*\n\n` +
-			`👤 Ты: ${subscribers.has(chatId) ? '✅ подписан' : '❌ не подписан'}\n` +
-			`👥 Всего подписчиков: ${subscribers.size}\n` +
-			`📋 Лист: \`${SHEET_NAME}\`\n` +
-			`⏱ Интервал: каждые 5 минут`,
+		`📊 *Bot Status*\n\n` +
+			`👤 You: ${subscribers.has(chatId) ? '✅ subscribed' : '❌ not subscribed'}\n` +
+			`👥 Total subscribers: ${subscribers.size}\n` +
+			`🚛 Tracked READY drivers: ${readySince.size}\n` +
+			`📋 Sheet: \`${SHEET_NAME}\`\n` +
+			`⏱ Interval: every 2 minutes`,
 		{ parse_mode: 'Markdown' },
 	);
 });
 
-// ─── HTTP сервер чтобы Render не засыпал ──────────────────────────────────────
+// ─── HTTP чтобы Render не засыпал ─────────────────────────────────────────────
 http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 
 // ─── ЗАПУСК ───────────────────────────────────────────────────────────────────
-console.log('🚀 Truck List Bot запущен (Google Sheets)');
-console.log(`📋 Лист: ${SHEET_NAME}`);
-console.log(`⏱ Проверка каждые 5 минут\n`);
+console.log('🚀 Truck READY Bot started');
+console.log(`📋 Sheet: ${SHEET_NAME}`);
+console.log(`⏱ Check interval: 2 minutes\n`);
 
+// Первая проверка сразу при старте
+checkAndNotify();
 setInterval(checkAndNotify, CHECK_INTERVAL_MS);
