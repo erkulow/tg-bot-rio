@@ -5,8 +5,8 @@ const http = require('http');
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const TOKEN = process.env.TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
-const SHEET_NAME = 'tg-bot-rio';
-const CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 минуты (поменяй на 5 * 60 * 1000 для прода)
+const SHEET_NAME = 'Opendeck';
+const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 минут (поменяй на 5 * 60 * 1000 для прода)
 // ──────────────────────────────────────────────────────────────────────────────
 
 const bot = new TelegramBot(TOKEN, { polling: true });
