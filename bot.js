@@ -5,7 +5,7 @@ const http = require('http');
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const TOKEN = process.env.TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
-const SHEET_NAME = 'Opendeck';
+const SHEET_NAME = 'Opendesk';
 const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 минут (поменяй на 5 * 60 * 1000 для прода)
 // ──────────────────────────────────────────────────────────────────────────────
 
